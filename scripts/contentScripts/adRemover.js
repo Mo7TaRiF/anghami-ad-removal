@@ -47,11 +47,19 @@
   }
 
   function googleIframesRemover() {
-    removeItems(
-      document.querySelectorAll(
+    document
+      .querySelectorAll(
         "iframe[name^='google_ads'], iframe[src*='googlead'], iframe[src*='doubleclick'], iframe[id^='google_ads']"
       )
-    );
+      .forEach((f) => {
+        if (isProtected(f)) return;
+        // داخل نافذة الإعلان: نخفيه فقط حتى لا يتعطل منطق التطبيق
+        if (f.closest("ngb-modal-window")) {
+          f.style.setProperty("visibility", "hidden", "important");
+        } else {
+          f.remove();
+        }
+      });
   }
 
   function removeAdContainers() {
@@ -88,7 +96,7 @@
 
   function muteVideoAds() {
     document
-      .querySelectorAll("#native-ad-video, video[src*='/ad'], video[class*='ad-'], video[id*='ad-']")
+      .querySelectorAll("#native-ad-video, ngb-modal-window video")
       .forEach((videoAd) => {
         videoAd.muted = true;
         videoAd.volume = 0;
@@ -114,7 +122,22 @@
     document.body.style.removeProperty("padding-right");
   }
 
-  // إغلاق نافذة الإعلان بين الأغاني بالطريقة التي يفهمها Angular، ثم الحذف بالقوة كحل أخير
+  // تسريع أي وسائط داخل نافذة الإعلان فقط (لا نلمس مشغّل الأغاني الرئيسي أبدًا)
+  function fastForwardMedia(root) {
+    root.querySelectorAll("video, audio").forEach((m) => {
+      try {
+        m.muted = true;
+        m.volume = 0;
+        m.playbackRate = 16;
+        if (isFinite(m.duration) && m.duration > 0 && m.currentTime < m.duration - 0.1) {
+          m.currentTime = m.duration;
+        }
+      } catch (e) {}
+    });
+  }
+
+  // نافذة الإعلان تبقى في الصفحة (مخفية بالـ CSS) ونسرّع الإعلان حتى ينتهي ويكمل التطبيق للأغنية التالية.
+  // الحذف بالقوة فقط كحل أخير جدًا بعد 15 ثانية.
   function dismissAdModal() {
     const modals = new Set();
     document.querySelectorAll("ngb-modal-window[class*='native-dfp-ad'], anghami-ads-modal").forEach((el) => {
@@ -123,29 +146,53 @@
     });
 
     modals.forEach((modal) => {
-      modal.__dismissTries = (modal.__dismissTries || 0) + 1;
+      modal.__t0 = modal.__t0 || Date.now();
+      const elapsed = Date.now() - modal.__t0;
 
-      if (modal.__dismissTries <= 2) {
-        // 1) زر إغلاق إن وُجد
+      fastForwardMedia(modal);
+
+      // بعد 3 ثوانٍ: نُعلم التطبيق بانتهاء الإعلان
+      if (elapsed > 3000 && !modal.__ended) {
+        modal.__ended = true;
+        modal.querySelectorAll("video, audio").forEach((m) => {
+          ["timeupdate", "ended"].forEach((t) => m.dispatchEvent(new Event(t)));
+        });
+      }
+
+      // بعد 6 ثوانٍ: نحاول الإغلاق بالطريقة الطبيعية (زر إغلاق ثم Escape)
+      if (elapsed > 6000 && !modal.__closed) {
+        modal.__closed = true;
         modal
           .querySelectorAll("button.close, [aria-label='Close'], [aria-label='close'], [class*='close']")
           .forEach(clickEl);
-        // 2) مفتاح Escape (ngb-modal يغلق عليه)
         ["keydown", "keyup"].forEach((type) =>
           modal.dispatchEvent(
             new KeyboardEvent(type, { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true })
           )
         );
-        // 3) نقرة على الخلفية (ngb-modal-window نفسه)
-        modal.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
-      } else {
-        // 4) حل أخير: حذف النافذة والخلفية وتنظيف حالة الصفحة
+      }
+
+      // بعد 15 ثانية: حل أخير
+      if (elapsed > 15000) {
         modal.remove();
         document.querySelectorAll("ngb-modal-backdrop").forEach((b) => b.remove());
         cleanupModalState();
         setTimeout(pressPlay, 300);
       }
     });
+  }
+
+  // إخفاء بصري فقط (العنصر يبقى في الـ DOM)
+  function injectHidingStyle() {
+    if (document.getElementById("anghami-adblock-style")) return;
+    const style = document.createElement("style");
+    style.id = "anghami-adblock-style";
+    style.textContent = `
+      ngb-modal-window[class*='native-dfp-ad'] { opacity: 0 !important; pointer-events: none !important; }
+      body:has(ngb-modal-window[class*='native-dfp-ad']) ngb-modal-backdrop { opacity: 0 !important; pointer-events: none !important; }
+      body:has(ngb-modal-window[class*='native-dfp-ad']) { overflow: auto !important; }
+    `;
+    (document.head || document.documentElement).appendChild(style);
   }
 
   function hideAdModals() {
@@ -203,6 +250,7 @@
   }
 
   function start() {
+    injectHidingStyle();
     optimizePage();
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
     setInterval(optimizePage, 1000);

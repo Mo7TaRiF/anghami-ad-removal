@@ -4,7 +4,7 @@
   window.__anghamiAdRemoverLoaded = true;
 
   // اجعلها false بعد الانتهاء من الفحص
-  const DEBUG = false;
+  const DEBUG = true;
   const log = (...a) => DEBUG && console.log("[AdRemover]", ...a);
 
   const PROTECTED = [
@@ -49,7 +49,26 @@
     }
   }
 
-  const AD_MODAL = "ngb-modal-window[class*='native-dfp-ad']";
+  // أنواع نوافذ الإعلانات المعروفة (واسعة قليلًا: أي نافذة تحمل dfp أو ad-modal أو تحتوي anghami-ads-modal)
+  const AD_MODAL =
+    "ngb-modal-window[class*='dfp'], ngb-modal-window[class*='ad-modal'], ngb-modal-window[class*='native-ad'], ngb-modal-window:has(anghami-ads-modal)";
+
+  // لتسجيل أي عنصر جديد يشبه الإعلان (مرة واحدة لكل وصف) لمعرفة شكل الإعلانات غير المعروفة
+  const seenLog = new Set();
+  function logPossibleAds(mutations) {
+    if (!DEBUG) return;
+    for (const m of mutations) {
+      m.addedNodes.forEach((n) => {
+        if (n.nodeType !== 1) return;
+        const d = describe(n);
+        if (seenLog.has(d)) return;
+        if (n.tagName === "NGB-MODAL-WINDOW" || /(^|[^a-z])(ad|ads|dfp|advert|promo)([^a-z]|$)/i.test(d)) {
+          seenLog.add(d);
+          log("NEW ELEMENT:", d, "|", (n.outerHTML || "").slice(0, 300));
+        }
+      });
+    }
+  }
 
   // ---- الحد الأدنى من الإزالة ----
 
@@ -74,8 +93,14 @@
       try {
         v.muted = true;
         v.volume = 0;
-        if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) {
-          v.currentTime = v.duration;
+        // تشغيل حقيقي بأقصى سرعة بدل القفز للنهاية، حتى يُطلق المتصفح أحداث timeupdate/ended
+        // التي ينتظرها التطبيق (وعندها يظهر زر الإغلاق)
+        if (v.src) {
+          v.playbackRate = 16;
+          if (v.paused && !v.ended) {
+            const p = v.play();
+            if (p && p.catch) p.catch(() => {});
+          }
         }
       } catch (e) {}
     });
@@ -102,15 +127,23 @@
       modal.__t0 = modal.__t0 || Date.now();
       const elapsed = Date.now() - modal.__t0;
 
-      if (elapsed > 6000 && !modal.__closed) {
+      // زر الإغلاق الحقيقي في نافذة الإعلان (div وليس button): نضغطه كلما وُجد، مرة كل ثانية
+      const closeBtn = modal.querySelector("#native-ad-close-ad-button");
+      if (closeBtn && Date.now() - (modal.__lastClose || 0) > 1000) {
+        modal.__lastClose = Date.now();
+        log("click #native-ad-close-ad-button");
+        clickEl(closeBtn);
+      }
+
+      if (elapsed > 3000 && !modal.__closed) {
         modal.__closed = true;
-        log("closing ad modal (button/Escape)");
+        log("no close button yet after 3s, trying Escape. Modal HTML:", modal.innerHTML.slice(0, 700));
         modal.querySelectorAll("button.close, [aria-label='Close'], [aria-label='close']").forEach(clickEl);
         ["keydown", "keyup"].forEach((type) =>
           modal.dispatchEvent(new KeyboardEvent(type, { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true }))
         );
       }
-      if (elapsed > 15000) {
+      if (elapsed > 8000) {
         log("force removing ad modal");
         modal.remove();
         document.querySelectorAll("ngb-modal-backdrop").forEach((b) => b.remove());
@@ -133,8 +166,12 @@
     style.id = "anghami-adblock-style";
     style.textContent = `
       ${AD_MODAL} { opacity: 0 !important; pointer-events: none !important; }
-      body:has(${AD_MODAL}) ngb-modal-backdrop { opacity: 0 !important; pointer-events: none !important; }
-      body:has(${AD_MODAL}) { overflow: auto !important; }
+      body:has(ngb-modal-window[class*='dfp']) ngb-modal-backdrop,
+      body:has(ngb-modal-window[class*='ad-modal']) ngb-modal-backdrop,
+      body:has(anghami-ads-modal) ngb-modal-backdrop { opacity: 0 !important; pointer-events: none !important; }
+      body:has(ngb-modal-window[class*='dfp']),
+      body:has(ngb-modal-window[class*='ad-modal']),
+      body:has(anghami-ads-modal) { overflow: auto !important; }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -170,7 +207,10 @@
   function start() {
     injectHidingStyle();
     optimizePage();
-    new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+    new MutationObserver((mutations) => {
+      logPossibleAds(mutations);
+      schedule();
+    }).observe(document.body, { childList: true, subtree: true });
     setInterval(optimizePage, 1500);
   }
 
